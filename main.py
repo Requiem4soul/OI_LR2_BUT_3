@@ -283,11 +283,11 @@ def main():
 
     # Пути к изображениям (замените на свои)
     image_paths = {
-        'test2_0': 'Data/test2_0.jpg',  # эталон
-        'test2_1': 'Data/test2_1.jpg',
-        'test2_2': 'Data/test2_2.jpg',
-        'test2_3': 'Data/test2_3.jpg',
-        'test2_4': 'Data/test2_4.jpg'
+    'test2_0': r'OI_LR2_BUT_3\Data\test2_0.jpg',
+    'test2_1': r'OI_LR2_BUT_3\Data\test2_1.jpg',
+    'test2_2': r'OI_LR2_BUT_3\Data\test2_2.jpg',
+    'test2_3': r'OI_LR2_BUT_3\Data\test2_3.jpg',
+    'test2_4': r'OI_LR2_BUT_3\Data\test2_4.jpg'
     }
 
     # Загружаем изображения

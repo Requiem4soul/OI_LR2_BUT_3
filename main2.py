@@ -16,11 +16,11 @@ TYPE_OF_NOISE = {
 }
 
 PATH_TO_IMG = {
-    'test2_0.jpg': 'Data/test2_0.jpg',
-    'test2_1.jpg': 'Data/test2_1.jpg',
-    'test2_2.jpg': 'Data/test2_2.jpg',
-    'test2_3.jpg': 'Data/test2_3.jpg',
-    'test2_4.jpg': 'Data/test2_4.jpg'
+    'test2_0.jpg': r'OI_LR2_BUT_3\Data\test2_0.jpg',
+    'test2_1.jpg': r'OI_LR2_BUT_3\Data\test2_1.jpg',
+    'test2_2.jpg': r'OI_LR2_BUT_3\Data\test2_2.jpg',
+    'test2_3.jpg': r'OI_LR2_BUT_3\Data\test2_3.jpg',
+    'test2_4.jpg': r'OI_LR2_BUT_3\Data\test2_4.jpg'
 }
 
 def load_image(paths): # Загрузка изображений
@@ -65,6 +65,108 @@ def analyze_histogram(noise_region): # Анализируем область и 
     }
 
     return analysis
+
+def find_best_params_by_PSNR(images, original_img):
+    """
+    Находит лучшие параметры фильтрации для каждого изображения по максимальному PSNR.
+    
+    Args:
+        images: словарь зашумленных изображений (ключ - имя файла, значение - изображение)
+        original_img: оригинальное изображение без шума
+    
+    Returns:
+        Словарь с результатами для каждого изображения
+    """
+    results = {}
+    
+    # Параметры для перебора
+    params = {
+        'gaussian': {'sigma': [0.5, 0.8, 1.0, 1.2, 1.5, 2.0]},
+        'median': {'size': [3, 5, 7]},
+        'wiener': {'balance': [0.01, 0.02, 0.05, 0.07, 0.1]},
+        'bilateral': {
+            'sigma_color': [10, 15, 20, 25, 35],
+            'sigma_spatial': [5, 10, 15, 25]
+        }
+    }
+    
+    for img_name, noisy_img in images.items():
+        if img_name == 'test2_0.jpg':  # Пропускаем оригинальное изображение
+            continue
+            
+        best_psnr = -1
+        best_result = None
+        
+        # Перебираем все типы фильтров и их параметры
+        # Гауссовский фильтр
+        for sigma in params['gaussian']['sigma']:
+            filtered = apply_gaussian_filter(noisy_img, sigma=sigma)
+            psnr = calculate_psnr(original_img, filtered)
+            if psnr > best_psnr:
+                best_psnr = psnr
+                best_result = {
+                    'filter': 'gaussian',
+                    'params': {'sigma': sigma},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Гауссовский фильтр (σ={sigma})'
+                }
+        
+        # Медианный фильтр
+        for size in params['median']['size']:
+            filtered = apply_median_filter(noisy_img, size=size)
+            psnr = calculate_psnr(original_img, filtered)
+            if psnr > best_psnr:
+                best_psnr = psnr
+                best_result = {
+                    'filter': 'median',
+                    'params': {'size': size},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Медианный фильтр ({size}x{size})'
+                }
+        
+        # Фильтр Винера (для Poisson)
+        for balance in params['wiener']['balance']:
+            filtered = apply_poisson_filter(noisy_img, noise_variance=balance)
+            psnr = calculate_psnr(original_img, filtered)
+            if psnr > best_psnr:
+                best_psnr = psnr
+                best_result = {
+                    'filter': 'wiener',
+                    'params': {'balance': balance},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Фильтр Винера (balance={balance})'
+                }
+        
+        # Билатеральный фильтр (для speckle)
+        for sigma_color in params['bilateral']['sigma_color']:
+            for sigma_spatial in params['bilateral']['sigma_spatial']:
+                filtered = apply_speckle_filter(
+                    noisy_img, 
+                    sigma_color=sigma_color, 
+                    sigma_spatial=sigma_spatial
+                )
+                psnr = calculate_psnr(original_img, filtered)
+                if psnr > best_psnr:
+                    best_psnr = psnr
+                    best_result = {
+                        'filter': 'bilateral',
+                        'params': {
+                            'sigma_color': sigma_color,
+                            'sigma_spatial': sigma_spatial
+                        },
+                        'filtered_img': filtered,
+                        'psnr': psnr,
+                        'filter_name': f'Билатеральный фильтр (цвет={sigma_color}, пространство={sigma_spatial})'
+                    }
+        
+        if best_result:
+            results[img_name] = best_result
+    
+    return results
+
 
 
 def determine_noise_type(analysis):
@@ -480,5 +582,27 @@ def main():
         plt.show()
 
 
+def main3():
+    images = load_image(PATH_TO_IMG)
+
+    if 'test2_0.jpg' not in images:
+        print("Оригинальное изображение (test2_0.jpg) не найдено!")
+        return
+    
+    original = images['test2_0.jpg']
+    
+    # Находим лучшие параметры фильтрации для всех изображений
+    best_results = find_best_params_by_PSNR(images, original)
+    
+    # Выводим результаты
+    for img_name, result in best_results.items():
+        print(f"\nИзображение: {img_name}")
+        print(f"Лучший фильтр: {result['filter_name']}")
+        print(f"PSNR: {result['psnr']:.2f} дБ")
+        
+        # Можно сохранить отфильтрованное изображение
+        filtered_img = (result['filtered_img'] * 255).astype(np.uint8)
+        cv2.imwrite(f"filtered_{img_name}", filtered_img)
+
 if __name__ == "__main__":
-    main()
+    main3()
