@@ -1,366 +1,327 @@
+import os
+from pathlib import Path
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy import ndimage, stats
+from scipy import stats
 from skimage import filters, restoration
 from skimage.metrics import peak_signal_noise_ratio
-import seaborn as sns
+
+TYPE_OF_NOISE = {
+    'gaussian': 'Гауссовский шум',
+    'salt_pepper': 'Импульсный шум (соль и перец)',
+    'uniform': 'Равномерный шум',
+    'poisson': 'Пуассоновский шум',
+    'speckle': 'Мультипликативный шум',
+    'laplacian': 'Шум Лапласа',
+    'mixed': 'Смешанный шум',
+    'unknown': 'Неопределённый шум'
+}
+
+PATH_TO_IMG = {
+    'test2_0.jpg': r'Data/test2_0.jpg',
+    'test2_1.jpg': r'Data/test2_1.jpg',
+    'test2_2.jpg': r'Data/test2_2.jpg',
+    'test2_3.jpg': r'Data/test2_3.jpg',
+    'test2_4.jpg': r'Data/test2_4.jpg'
+}
 
 
-class NoiseAnalyzer:
-    def __init__(self):
-        self.noise_types = {
-            'gaussian': 'Гауссовский шум',
-            'salt_pepper': 'Импульсный шум (соль и перец)',
-            'uniform': 'Равномерный шум',
-            'poisson': 'Пуассоновский шум',
-            'speckle': 'Мультипликативный шум'
+def load_image(paths):
+    images = {}
+    for name, path in paths.items():
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            images[name] = img.astype(np.float64) / 255.0
+        else:
+            print(f"Предупреждение: не удалось загрузить изображение {path}")
+    return images
+
+
+def calculate_psnr(original, noisy):
+    return peak_signal_noise_ratio(original, noisy, data_range=1.0)
+
+
+def extract_noise_region(image):
+    """Извлечение всей области изображения для анализа шума"""
+    h, w = image.shape
+    return image[0:h, 0:w]
+
+
+def apply_gaussian_filter(image, sigma=1.0):
+    return filters.gaussian(image, sigma=sigma)
+
+
+def apply_median_filter(image, size=3):
+    return filters.median(image, np.ones((size, size)))
+
+
+def apply_poisson_filter(image, noise_variance=0.05):
+    psf = np.ones((5, 5)) / 25
+    return restoration.wiener(image, psf, balance=noise_variance)
+
+
+def apply_speckle_filter(image, sigma_color=25, sigma_spatial=15):
+    img_uint8 = (image * 255).astype(np.uint8)
+    filtered = cv2.bilateralFilter(img_uint8, d=-1,
+                                   sigmaColor=sigma_color,
+                                   sigmaSpace=sigma_spatial)
+    return filtered.astype(np.float64) / 255.0
+
+
+def find_best_cascade_filters(noisy_image, original_image, max_depth=4):
+    """
+    Находит оптимальную последовательность фильтров (каскад) глубиной до max_depth
+    """
+    current_image = noisy_image.copy()
+    original_psnr = calculate_psnr(original_image, current_image)
+
+    cascade_results = []
+    best_psnr = original_psnr
+
+    # Параметры для перебора
+    params = {
+        'gaussian': {'sigma': [0.5, 0.8, 1.0, 1.2, 1.5, 2.0]},
+        'median': {'size': [3, 5, 7]},
+        'wiener': {'balance': [0.01, 0.02, 0.05, 0.07, 0.1]},
+        'bilateral': {
+            'sigma_color': [10, 15, 20, 25, 35],
+            'sigma_spatial': [5, 10, 15, 25]
         }
-
-    def load_images(self, paths):
-        """Загрузка изображений"""
-        images = {}
-        for name, path in paths.items():
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-            if img is not None:
-                images[name] = img.astype(np.float64) / 255.0
-            else:
-                print(f"Не удалось загрузить изображение: {path}")
-        return images
-
-    def calculate_psnr(self, original, noisy):
-        """Расчет PSNR между изображениями"""
-        if original.shape != noisy.shape:
-            print("Изображения должны иметь одинаковые размеры")
-            return None
-        return peak_signal_noise_ratio(original, noisy, data_range=1.0)
-
-    def evaluate_all_filters(self, image, original=None):
-        """Применяет все фильтры и сравнивает их (если есть эталон)"""
-        filter_variants = {
-            'Гауссовский (σ=1.0)': self.apply_gaussian_filter(image, sigma=1.0),
-            'Гауссовский (σ=1.5)': self.apply_gaussian_filter(image, sigma=1.5),
-            'Медианный (3x3)': self.apply_median_filter(image, disk_size=3),
-            'Медианный (5x5)': self.apply_median_filter(image, disk_size=5),
-            'Винера': self.apply_wiener_filter(image, noise_variance=0.01),
-            'Билатеральный': self.apply_bilateral_filter(image)
-        }
-
-        psnr_results = {}
-        if original is not None:
-            for name, filtered in filter_variants.items():
-                psnr = self.calculate_psnr(original, filtered)
-                psnr_results[name] = psnr
-
-        return filter_variants, psnr_results
-
-    def analyze_histogram(self, noise_region):
-        """Анализ гистограммы для определения типа шума"""
-        hist, bins = np.histogram(noise_region.flatten(), bins=50, density=True)
-        bin_centers = (bins[:-1] + bins[1:]) / 2
-
-        # Статистические характеристики
-        mean_val = np.mean(noise_region)
-        std_val = np.std(noise_region)
-        skewness = stats.skew(noise_region.flatten())
-        kurtosis = stats.kurtosis(noise_region.flatten())
-
-        # Тесты на нормальность распределения
-        shapiro_stat, shapiro_p = stats.shapiro(noise_region.flatten()[:5000])  # ограничиваем выборку
-
-        analysis = {
-            'mean': mean_val,
-            'std': std_val,
-            'skewness': skewness,
-            'kurtosis': kurtosis,
-            'shapiro_stat': shapiro_stat,
-            'shapiro_p': shapiro_p,
-            'histogram': (hist, bin_centers)
-        }
-
-        return analysis
-
-    def determine_noise_type(self, analysis):
-        """Определение типа шума на основе статистического анализа"""
-        skewness = analysis['skewness']
-        kurtosis = analysis['kurtosis']
-        shapiro_p = analysis['shapiro_p']
-
-        # Критерии для определения типа шума
-        if shapiro_p > 0.05:  # Гауссовское распределение
-            if abs(skewness) < 0.5 and abs(kurtosis) < 3:
-                return 'gaussian', f"Гауссовский шум (p-value={shapiro_p:.4f}, асимметрия={skewness:.3f})"
-
-        if kurtosis > 10:  # Высокий эксцесс - признак импульсного шума
-            return 'salt_pepper', f"Импульсный шум (эксцесс={kurtosis:.3f})"
-
-        if abs(skewness) < 0.3 and 2 < kurtosis < 5:
-            return 'uniform', f"Равномерный шум (асимметрия={skewness:.3f}, эксцесс={kurtosis:.3f})"
-
-        return 'gaussian', f"Предположительно гауссовский шум (требует дополнительного анализа)"
-
-    def extract_noise_region(self, image, region_size=50):
-        """Извлечение однородной области для анализа шума"""
-        h, w = image.shape
-        # Берем область из центра изображения (обычно менее детализированная)
-        center_y, center_x = h // 2, w // 2
-        y1 = max(0, center_y - region_size // 2)
-        y2 = min(h, center_y + region_size // 2)
-        x1 = max(0, center_x - region_size // 2)
-        x2 = min(w, center_x + region_size // 2)
-
-        return image[y1:y2, x1:x2]
-
-    def apply_gaussian_filter(self, image, sigma=1.0):
-        """Применение Гауссовского фильтра"""
-        return filters.gaussian(image, sigma=sigma)
-
-    def apply_median_filter(self, image, disk_size=3):
-        """Применение медианного фильтра"""
-        return filters.median(image, np.ones((disk_size, disk_size)))
-
-    def apply_wiener_filter(self, image, noise_variance=0.01):
-        """Применение фильтра Винера"""
-        # Простая реализация фильтра Винера
-        return restoration.wiener(image, np.ones((5, 5)) / 25, noise_variance)
-
-    def apply_bilateral_filter(self, image, sigma_color=0.1, sigma_spatial=15):
-        """Применение билатерального фильтра"""
-        # Преобразуем в uint8 для работы с OpenCV
-        img_uint8 = (image * 255).astype(np.uint8)
-        filtered = cv2.bilateralFilter(img_uint8, -1, sigma_color * 255, sigma_spatial)
-        return filtered.astype(np.float64) / 255.0
-
-    def select_optimal_filter(self, noise_type, image, original=None):
-        """Выбор оптимального фильтра на основе типа шума"""
-        filters_to_test = {}
-
-        if noise_type == 'gaussian':
-            filters_to_test['Гауссовский (σ=0.8)'] = self.apply_gaussian_filter(image, sigma=0.8)
-            filters_to_test['Гауссовский (σ=1.2)'] = self.apply_gaussian_filter(image, sigma=1.2)
-            filters_to_test['Винера'] = self.apply_wiener_filter(image, noise_variance=0.01)
-            filters_to_test['Билатеральный'] = self.apply_bilateral_filter(image)
-
-        elif noise_type == 'salt_pepper':
-            filters_to_test['Медианный (3x3)'] = self.apply_median_filter(image, disk_size=3)
-            filters_to_test['Медианный (5x5)'] = self.apply_median_filter(image, disk_size=5)
-            filters_to_test['Билатеральный'] = self.apply_bilateral_filter(image)
-
-        else:  # универсальный подход
-            filters_to_test['Гауссовский'] = self.apply_gaussian_filter(image, sigma=1.0)
-            filters_to_test['Медианный'] = self.apply_median_filter(image, disk_size=3)
-            filters_to_test['Билатеральный'] = self.apply_bilateral_filter(image)
-
-        # Если есть оригинальное изображение, выбираем лучший по PSNR
-        if original is not None:
-            best_filter = None
-            best_psnr = 0
-            psnr_results = {}
-
-            for filter_name, filtered_img in filters_to_test.items():
-                psnr = self.calculate_psnr(original, filtered_img)
-                psnr_results[filter_name] = psnr
-                if psnr > best_psnr:
-                    best_psnr = psnr
-                    best_filter = filter_name
-
-            return filters_to_test[best_filter], best_filter, psnr_results
-
-        # Если нет оригинала, возвращаем первый фильтр
-        first_filter_name = list(filters_to_test.keys())[0]
-        return filters_to_test[first_filter_name], first_filter_name, {}
-
-    def plot_histogram_analysis(self, image, noise_region, analysis, noise_type_info):
-        """Визуализация анализа гистограммы"""
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-        # Исходное изображение
-        axes[0, 0].imshow(image, cmap='gray')
-        axes[0, 0].set_title('Изображение с шумом')
-        axes[0, 0].axis('off')
-
-        # Область для анализа шума
-        axes[0, 1].imshow(noise_region, cmap='gray')
-        axes[0, 1].set_title('Область анализа шума')
-        axes[0, 1].axis('off')
-
-        # Гистограмма
-        hist, bin_centers = analysis['histogram']
-        axes[1, 0].bar(bin_centers, hist, width=bin_centers[1] - bin_centers[0], alpha=0.7)
-        axes[1, 0].set_title('Гистограмма области шума')
-        axes[1, 0].set_xlabel('Значение интенсивности')
-        axes[1, 0].set_ylabel('Плотность')
-
-        # Статистики
-        stats_text = f"""Статистический анализ:
-Среднее: {analysis['mean']:.4f}
-Ст. отклонение: {analysis['std']:.4f}
-Асимметрия: {analysis['skewness']:.4f}
-Эксцесс: {analysis['kurtosis']:.4f}
-Тест Шапиро-Уилка: {analysis['shapiro_p']:.4f}
-
-Тип шума: {noise_type_info}"""
-
-        axes[1, 1].text(0.1, 0.5, stats_text, transform=axes[1, 1].transAxes,
-                        fontsize=10, verticalalignment='center')
-        axes[1, 1].axis('off')
-
-        plt.tight_layout()
-        return fig
-
-    def analyze_single_image(self, image_name, image, original=None):
-        """Полный анализ одного изображения"""
-        print(f"\n=== Анализ изображения: {image_name} ===")
-
-        # Извлекаем область для анализа шума
-        noise_region = self.extract_noise_region(image)
-
-        # Анализируем гистограмму
-        analysis = self.analyze_histogram(noise_region)
-
-        # Определяем тип шума
-        noise_type, noise_explanation = self.determine_noise_type(analysis)
-
-        print(f"Тип шума: {self.noise_types[noise_type]}")
-        print(f"Обоснование: {noise_explanation}")
-
-        # Выбираем и применяем фильтр
-        filtered_image, filter_name, psnr_results = self.select_optimal_filter(
-            noise_type, image, original)
-
-        # Расчет PSNR
-        if original is not None:
-            psnr_before = self.calculate_psnr(original, image)
-            psnr_after = self.calculate_psnr(original, filtered_image)
-            print(f"PSNR до фильтрации: {psnr_before:.2f} дБ")
-            print(f"PSNR после фильтрации ({filter_name}): {psnr_after:.2f} дБ")
-            print(f"Улучшение: {psnr_after - psnr_before:.2f} дБ")
-
-        # Обоснование выбора метода
-        filter_justification = self.get_filter_justification(noise_type, filter_name)
-        print(f"Обоснование метода: {filter_justification}")
-
-        # Создаем визуализацию
-        fig = self.plot_histogram_analysis(image, noise_region, analysis, noise_explanation)
-
-        all_filtered_images, all_psnrs = self.evaluate_all_filters(image, original)
-        print("=== Оценка всех фильтров ===")
-        for fname, psnr_val in all_psnrs.items():
-            print(f"{fname}: {psnr_val:.2f} дБ")
-
-        return {
-            'noise_type': self.noise_types[noise_type],
-            'noise_explanation': noise_explanation,
-            'filter_name': filter_name,
-            'filter_justification': filter_justification,
-            'filtered_image': filtered_image,
-            'psnr_before': self.calculate_psnr(original, image) if original is not None else None,
-            'psnr_after': self.calculate_psnr(original, filtered_image) if original is not None else None,
-            'psnr_results': psnr_results,
-            'analysis_plot': fig
-        }
-
-    def get_filter_justification(self, noise_type, filter_name):
-        """Обоснование выбора фильтра"""
-        justifications = {
-            'gaussian': {
-                'Гауссовский': "Гауссовский фильтр эффективен для гауссовского шума, так как выполняет линейное сглаживание с весами по нормальному распределению",
-                'Винера': "Фильтр Винера оптимален для гауссовского шума, минимизирует среднеквадратичную ошибку",
-                'Билатеральный': "Билатеральный фильтр сохраняет края при подавлении гауссовского шума"
-            },
-            'salt_pepper': {
-                'Медианный': "Медианный фильтр эффективно устраняет импульсный шум, заменяя выбросы медианным значением окружения",
-                'Билатеральный': "Билатеральный фильтр может подавлять импульсный шум с сохранением краев"
-            }
-        }
-        return justifications.get(noise_type, {}).get(filter_name.split('(')[0].strip(),
-                                                      "Универсальный подход для данного типа шума")
-
-
-def main():
-    """Основная функция для выполнения лабораторной работы"""
-    analyzer = NoiseAnalyzer()
-
-    # Пути к изображениям (замените на свои)
-    image_paths = {
-    'test2_0': r'OI_LR2_BUT_3\Data\test2_0.jpg',
-    'test2_1': r'OI_LR2_BUT_3\Data\test2_1.jpg',
-    'test2_2': r'OI_LR2_BUT_3\Data\test2_2.jpg',
-    'test2_3': r'OI_LR2_BUT_3\Data\test2_3.jpg',
-    'test2_4': r'OI_LR2_BUT_3\Data\test2_4.jpg'
     }
 
-    # Загружаем изображения
-    images = analyzer.load_images(image_paths)
+    for depth in range(1, max_depth + 1):
+        step_best_psnr = -1
+        step_best_result = None
 
-    if 'test2_0' not in images:
-        print("Оригинальное изображение не найдено!")
+        # Гауссовский фильтр
+        for sigma in params['gaussian']['sigma']:
+            filtered = apply_gaussian_filter(current_image, sigma=sigma)
+            psnr = calculate_psnr(original_image, filtered)
+            if psnr > step_best_psnr:
+                step_best_psnr = psnr
+                step_best_result = {
+                    'filter': 'gaussian',
+                    'params': {'sigma': sigma},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Гауссовский фильтр (σ={sigma})'
+                }
+
+        # Медианный фильтр
+        for size in params['median']['size']:
+            filtered = apply_median_filter(current_image, size=size)
+            psnr = calculate_psnr(original_image, filtered)
+            if psnr > step_best_psnr:
+                step_best_psnr = psnr
+                step_best_result = {
+                    'filter': 'median',
+                    'params': {'size': size},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Медианный фильтр ({size}x{size})'
+                }
+
+        # Фильтр Винера
+        for balance in params['wiener']['balance']:
+            filtered = apply_poisson_filter(current_image, noise_variance=balance)
+            psnr = calculate_psnr(original_image, filtered)
+            if psnr > step_best_psnr:
+                step_best_psnr = psnr
+                step_best_result = {
+                    'filter': 'wiener',
+                    'params': {'balance': balance},
+                    'filtered_img': filtered,
+                    'psnr': psnr,
+                    'filter_name': f'Фильтр Винера (balance={balance})'
+                }
+
+        # Билатеральный фильтр
+        for sigma_color in params['bilateral']['sigma_color']:
+            for sigma_spatial in params['bilateral']['sigma_spatial']:
+                filtered = apply_speckle_filter(
+                    current_image,
+                    sigma_color=sigma_color,
+                    sigma_spatial=sigma_spatial
+                )
+                psnr = calculate_psnr(original_image, filtered)
+                if psnr > step_best_psnr:
+                    step_best_psnr = psnr
+                    step_best_result = {
+                        'filter': 'bilateral',
+                        'params': {
+                            'sigma_color': sigma_color,
+                            'sigma_spatial': sigma_spatial
+                        },
+                        'filtered_img': filtered,
+                        'psnr': psnr,
+                        'filter_name': f'Билатеральный фильтр (цвет={sigma_color}, пространство={sigma_spatial})'
+                    }
+
+        # Проверяем улучшение
+        improvement = step_best_psnr - best_psnr
+
+        if improvement > 0:  # порог улучшения
+            cascade_results.append({
+                'step': depth,
+                'result': step_best_result,
+                'improvement': improvement
+            })
+            current_image = step_best_result['filtered_img'].copy()
+            best_psnr = step_best_psnr
+        else:
+            break  # Если улучшение незначительное, останавливаем каскад
+
+    return cascade_results, best_psnr
+
+
+def determine_noise_type_from_cascade(cascade_results):
+    """Определяет тип шума на основе последовательности лучших фильтров"""
+    if not cascade_results:
+        return 'unknown', "Не удалось применить ни одного фильтра эффективно"
+
+    # Собираем типы использованных фильтров
+    used_filters = [step['result']['filter'] for step in cascade_results]
+    filter_sequence = " -> ".join([step['result']['filter_name'] for step in cascade_results])
+
+    # Анализируем первый (самый эффективный) фильтр
+    primary_filter = used_filters[0]
+
+    # Определяем тип шума
+    if primary_filter == 'median':
+        if len(used_filters) == 1:
+            return 'salt_pepper', f"Импульсный шум - наиболее эффективен медианный фильтр. Последовательность: {filter_sequence}"
+        else:
+            return 'mixed', f"Смешанный шум с импульсной компонентой. Последовательность: {filter_sequence}"
+
+    elif primary_filter == 'gaussian':
+        if 'wiener' in used_filters:
+            return 'gaussian', f"Гауссовский шум - эффективны гауссовский и винеровский фильтры. Последовательность: {filter_sequence}"
+        elif len(used_filters) > 1:
+            return 'mixed', f"Смешанный шум с гауссовской компонентой. Последовательность: {filter_sequence}"
+        else:
+            return 'gaussian', f"Гауссовский/равномерный шум. Последовательность: {filter_sequence}"
+
+    elif primary_filter == 'wiener':
+        if 'gaussian' in used_filters:
+            return 'poisson', f"Пуассоновский шум - винеровский фильтр с гауссовским сглаживанием. Последовательность: {filter_sequence}"
+        else:
+            return 'poisson', f"Пуассоновский шум. Последовательность: {filter_sequence}"
+
+    elif primary_filter == 'bilateral':
+        if len(used_filters) == 1:
+            return 'speckle', f"Мультипликативный (спекл) шум. Последовательность: {filter_sequence}"
+        else:
+            return 'mixed', f"Смешанный шум со спекл-компонентой. Последовательность: {filter_sequence}"
+
+    # Если несколько разных типов фильтров - вероятно сложный смешанный шум
+    if len(set(used_filters)) >= 3:
+        return 'mixed', f"Сложный смешанный шум - требует множественной фильтрации. Последовательность: {filter_sequence}"
+
+    return 'unknown', f"Неопределенный тип шума. Последовательность: {filter_sequence}"
+
+def comprehensive_analysis_single_image(img_name, noisy_image, original_image, max_depth=4):
+    """Комплексный анализ одного изображения с каскадной фильтрацией"""
+    print(f"АНАЛИЗ ИЗОБРАЖЕНИЯ: {img_name}")
+
+    original_psnr = calculate_psnr(original_image, noisy_image)
+    print(f"Исходный PSNR: {original_psnr:.2f} дБ")
+
+    # 1. Находим оптимальный каскад фильтров
+    cascade_results, final_psnr = find_best_cascade_filters(noisy_image, original_image, max_depth)
+
+    # 3. Дополнительный статистический анализ области
+    noise_region = extract_noise_region(noisy_image)
+    mean_val = np.mean(noise_region)
+    std_val = np.std(noise_region)
+    skew = stats.skew(noise_region.flatten())
+    kurt = stats.kurtosis(noise_region.flatten())
+    p_value = stats.shapiro(noise_region.flatten()[:5000])[1]
+
+    print(f"\nКаскад фильтрации:")
+    total_improvement = 0
+    for i, step in enumerate(cascade_results, 1):
+        result = step['result']
+        improvement = step['improvement']
+        total_improvement += improvement
+        print(f"  Шаг {i}: {result['filter_name']} (PSNR: {result['psnr']:.2f} дБ, +{improvement:.2f} дБ)")
+
+    print(f"\nИтоговые метрики:")
+    print(f"  • Финальный PSNR: {final_psnr:.2f} дБ")
+    print(f"  • Общее улучшение: {total_improvement:.2f} дБ")
+
+    # Возвращаем финальное отфильтрованное изображение
+    final_filtered = cascade_results[-1]['result']['filtered_img'] if cascade_results else noisy_image
+
+    # Сохраняем финальное изображение после каскада
+    save_filtered_image(final_filtered, f"{img_name}")
+
+    return {
+        'cascade': cascade_results,
+        'statistics': {
+            'mean': mean_val,
+            'std': std_val,
+            'skewness': skew,
+            'kurtosis': kurt,
+            'shapiro_p': p_value
+        },
+        'psnr_original': original_psnr,
+        'psnr_final': final_psnr,
+        'improvement': total_improvement,
+        'final_filtered_image': final_filtered
+    }
+
+
+def main_cascade_analysis():
+    """Основная функция для анализа всех изображений с каскадной фильтрацией"""
+    images = load_image(PATH_TO_IMG)
+
+    if 'test2_0.jpg' not in images:
+        print("Оригинальное изображение (test2_0.jpg) не найдено!")
         return
 
-    original = images['test2_0']
+    original = images['test2_0.jpg']
     results = {}
 
-    # Анализируем каждое изображение с шумом
-    for img_name in ['test2_1', 'test2_2', 'test2_3', 'test2_4']:
-        if img_name in images:
-            result = analyzer.analyze_single_image(img_name, images[img_name], original)
-            results[img_name] = result
+    # Анализируем все зашумленные изображения
+    for filename in ['test2_1.jpg', 'test2_2.jpg', 'test2_3.jpg', 'test2_4.jpg']:
+        if filename in images:
+            result = comprehensive_analysis_single_image(
+                filename,
+                images[filename],
+                original,
+                max_depth=4
+            )
+            results[filename] = result
 
-    # Создаем сводную диаграмму PSNR
-    if results:
-        create_psnr_comparison(results)
-
-    # Выводим таблицу результатов
-    print_results_table(results)
-
-    plt.show()
-
-
-def create_psnr_comparison(results):
-    """Создание диаграммы сравнения PSNR"""
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    images = list(results.keys())
-    psnr_before = [results[img]['psnr_before'] for img in images if results[img]['psnr_before']]
-    psnr_after = [results[img]['psnr_after'] for img in images if results[img]['psnr_after']]
-
-    x = np.arange(len(images))
-    width = 0.35
-
-    ax.bar(x - width / 2, psnr_before, width, label='До фильтрации', alpha=0.7)
-    ax.bar(x + width / 2, psnr_after, width, label='После фильтрации', alpha=0.7)
-
-    ax.set_xlabel('Изображения')
-    ax.set_ylabel('PSNR (дБ)')
-    ax.set_title('Сравнение PSNR до и после фильтрации')
-    ax.set_xticks(x)
-    ax.set_xticklabels(images)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-
-def print_results_table(results):
-    """Вывод таблицы результатов"""
-    print("\n" + "=" * 100)
+    # Сводная таблица
+    print(f"\n{'=' * 100}")
     print("СВОДНАЯ ТАБЛИЦА РЕЗУЛЬТАТОВ")
-    print("=" * 100)
+    print(f"{'=' * 100}")
 
-    headers = ["Изображение", "Тип шума", "Метод фильтрации", "PSNR до", "PSNR после", "Улучшение"]
+    headers = ["Изображение", "Тип шума", "Количество фильтров", "PSNR до", "PSNR после", "Улучшение"]
     print(
-        f"{headers[0]:<12} | {headers[1]:<20} | {headers[2]:<20} | {headers[3]:<8} | {headers[4]:<10} | {headers[5]:<10}")
+        f"{headers[0]:<15} | {headers[1]:<20} | {headers[2]:<18} | {headers[3]:<8} | {headers[4]:<10} | {headers[5]:<10}")
     print("-" * 100)
 
     for img_name, result in results.items():
-        psnr_before = f"{result['psnr_before']:.2f}" if result['psnr_before'] else "N/A"
-        psnr_after = f"{result['psnr_after']:.2f}" if result['psnr_after'] else "N/A"
-        improvement = f"{result['psnr_after'] - result['psnr_before']:.2f}" if result['psnr_before'] and result[
-            'psnr_after'] else "N/A"
+        noise_type = TYPE_OF_NOISE.get(result['noise_type'], result['noise_type'])
+        num_filters = len(result['cascade'])
+        psnr_before = f"{result['psnr_original']:.2f}"
+        psnr_after = f"{result['psnr_final']:.2f}"
+        improvement = f"{result['improvement']:.2f}"
 
         print(
-            f"{img_name:<12} | {result['noise_type']:<20} | {result['filter_name']:<20} | {psnr_before:<8} | {psnr_after:<10} | {improvement:<10}")
+            f"{img_name:<15} | {noise_type:<20} | {num_filters:<18} | {psnr_before:<8} | {psnr_after:<10} | {improvement:<10}")
 
+    return results
+
+
+def save_filtered_image(image, filename, folder="Data/better"):
+    """Сохраняет изображение в указанную папку"""
+    Path(folder).mkdir(parents=True, exist_ok=True)  # создать папку, если нет
+    save_path = os.path.join(folder, filename)
+    img_uint8 = (image * 255).clip(0, 255).astype(np.uint8)
+    cv2.imwrite(save_path, img_uint8)
 
 if __name__ == "__main__":
-    main()
+    main_cascade_analysis()
